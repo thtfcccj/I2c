@@ -12,6 +12,10 @@
 //1.为方便使用,I2c数据定义为专用,从机在I2cSlave 定义为I2cSlaveData_t
 //2.为节省数据存储空间,结构内部数据位置进行了优化(尽量4字节对齐)
 
+//全局配置:
+//#define SUPPORT_I2C_DEV_CB      //支持回调时，非阻塞方式定义可加快速度(部分驱动支持)
+
+
 /**********************************************************************
                         相关结构
 **********************************************************************/
@@ -19,7 +23,7 @@
 //I2c数据定义
 typedef struct _I2cData{
   unsigned char SlvAdr;         //从机地址,0-127
-  unsigned char CmdSize;        //命令字大小,可以为0
+  unsigned char CmdSize;        //命令字大小,可以为0(部分驱动不支持无指令读)
   unsigned char DataSize;       //数据字大小,>= 1;
   unsigned char Flag;           //相关标志字，见定义
 
@@ -28,9 +32,16 @@ typedef struct _I2cData{
 }I2cData_t;
 
 //其中，相关标志字定义为：
-#define   I2C_WAIT_OV_MASK  0x3f   //I2c等待时间，0-64TICK
+#define   I2C_WAIT_OV_MASK  0x3f      //I2c等待时间，0-64TICK
 #define   I2C_CMD_RD        0x80      //读标志
 #define   I2C_CMD_WR        0x00      //写标志
+
+#ifdef SUPPORT_I2C_DEV_CB      //支持回调时,定义回调允许及标志：
+  #define   I2C_CB_FINAL      0x40      //数据收发结束时回调
+  #define   I2C_CB_RCV        0x20      //接收到第一个字节时回调
+  #define   I2C_CB_ERR        0x10      //状态错误时回调
+  #define   I2C_CB_OV         0x08      //超时时回调
+#endif
 
 //I2c总线工作状态机定义
 enum eI2cStatus_t
@@ -50,13 +61,17 @@ enum eI2cStatus_t
 };
 
 //I2c设备定义
-typedef struct _I2cDev_t{
+typedef struct _I2cDev{
   void *pI2cHw;                            //挂接的I2c硬件设备指针
   I2cData_t  *pData;                        //正在通读的I2c从机设备或命令
+  #ifdef SUPPORT_I2C_DEV_CB      //支持回调时回调函数,必须定义
+    void (*CallBack)(struct _I2cDev *,unsigned char NotifyFlag);
+  #endif
   volatile enum eI2cStatus_t eStatus;      //状态机,外部只读
   unsigned char Index;                     //用于标识正在处理那一位
   unsigned char ErrTimer;                  //错误定时器
 }I2cDev_t;
+
 
 /**********************************************************************
                         相关函数,供外部使用
@@ -70,11 +85,18 @@ void I2cDev_Init(I2cDev_t *pI2cDev,        //未初始化的设备指针
                  unsigned int Mck,         //主时钟
                  unsigned int Baudrate);   //设定的波特率
 
+//-------------------------------重配置回调函数----------------------------
+#ifdef SUPPORT_I2C_DEV_CB      //支持回调时回调函数
+//void I2cDev_ReCfgCB(I2cDev_t *pI2cDev,        //已初始化的设备指针
+//                    void (*CallBack)(struct _I2cDev_t *,unsigned char NotifyFlag);
+#define I2cDev_CfgCB(i2cDev, cb)  do{(i2cDev)->CallBack = cb;}while(0)
+#endif
+
 //-----------------------------I2c读写数据启动函数-------------------------
 ////返回是否成功 0成功,非0失败
 //当状态机正在运行期间访问时，将返回错识
 signed char I2cDev_ReStart(I2cDev_t *pI2cDev, //设备指针
-                           I2cData_t *pData);
+                            I2cData_t *pData);
 
 //-----------------------------I2c强制复位函数-------------------------
 //停止并强制I2c复位
