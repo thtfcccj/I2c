@@ -16,7 +16,7 @@
 ***********************************************************************/
 
 //默认I2c的信息结构
-struct _I2cInfo _DefaultInfo = {
+static struct _I2cInfo _DefaultInfo = {
   100,        //波特率，K为单位
 };
 
