@@ -9,8 +9,9 @@
 
 #include <string.h>
 
-#ifndef I2C_DEV_MHZ//I2C时钟频率MHZ,范围2~50
-  #define I2C_DEV_MHZ    25    
+#ifndef I2C_DEV_MHZ//I2C时钟频率MHZ 全部在APB1, 为4分频
+  #define I2C_DEV_MHZ   (SYS_MHZ / 4)   
+  #define I2C_DEV_HZ    ((unsigned long)SYS_MHZ * 1000000 / 4)   
 #endif
 
 #ifdef SUPPORT_I2C_DEV_CB      //支持回调时空回调防止出错
@@ -23,12 +24,13 @@
 void I2cDev_CfgClk(I2C_TypeDef *pHw,
                    unsigned int Baudrate)   //设定的波特率
 {
-  //先停止I2c总线才能配置
-  pHw->CR1 = I2C_CR1_SWRST;  
+  pHw->CR1 = I2C_CR1_SWRST; //复位，同时将清除所有配置
+  pHw->CR1 = 0;  
   //时钟，打开数据缓冲区中断与事件中断(暂不用DMA,故障中断有查询方式)
-  pHw->CR2 = I2C_DEV_MHZ | I2C_CR2_ITEVTEN |  I2C_CR2_ITBUFEN; 
+  pHw->CR2 = I2C_DEV_MHZ | I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN |  I2C_CR2_ITERREN; 
   //计算并配置I2c波特率,50%占空比,Sm mode or SMBus
-  unsigned char Baud = (unsigned long)(I2C_DEV_MHZ / 2)  / Baudrate;
+  unsigned short Baud = (I2C_DEV_HZ / 2)  / Baudrate;
+  if(Baud > 4095) Baud = 4095;//11位
   pHw->CCR = Baud;
   //配置上升沿与滤波
   Baud /= 100;
@@ -68,7 +70,6 @@ signed char I2cDev_ReStart(I2cDev_t *pI2cDev, //设备指针
   //I2c进行过程中禁止访问
   if((eStatus > eI2cIdie) && (eStatus < eI2cDone)) return -1;
 
-  pHw->CR1 = I2C_CR1_SWRST;  //先停止
   //初始化结构相关：
   pI2cDev->Index = 0;
   pI2cDev->ErrTimer = pData->Flag & I2C_WAIT_OV_MASK;
@@ -76,7 +77,7 @@ signed char I2cDev_ReStart(I2cDev_t *pI2cDev, //设备指针
   pI2cDev->eStatus = eI2cRdy; //准备状态
   //启动I2c开始工作
   pHw->OAR1 = pData->SlvAdr << 1; //7bit模式，地址写入  
-  pHw->CR1 |=  I2C_CR1_PE| I2C_CR1_START; //允许并开始启动(成功后进中断)
+  pHw->CR1 |=  I2C_CR1_PE | I2C_CR1_START; //允许并开始启动(成功后进中断)
 
   return 0;
 }
@@ -85,8 +86,19 @@ signed char I2cDev_ReStart(I2cDev_t *pI2cDev, //设备指针
 //停止并强制I2c复位
 void I2cDev_Reset(I2cDev_t *pI2cDev)
 {
+  //复位硬件
   I2C_TypeDef *pHw = (I2C_TypeDef *)(pI2cDev->pI2cHw);
-  pHw->CR1 = I2C_CR1_SWRST;
+  unsigned short CCR = pHw->CCR;//复位前记住波特率配置等
+  pHw->CR1 = I2C_CR1_SWRST; //复位，同时将清除所有配置
+  pHw->CR1 = 0;  
+  //时钟，打开数据缓冲区中断与事件中断(暂不用DMA,故障中断有查询方式)
+  pHw->CR2 = I2C_DEV_MHZ | I2C_CR2_ITEVTEN |  I2C_CR2_ITBUFEN | I2C_CR2_ITERREN; 
+  pHw->CCR = CCR;
+  CCR /= 100;
+  pHw->TRISE = CCR;//上升沿,回环模式用得到
+  pHw->FLTR = CCR;//开启数据滤波，多少个时间周期有效
+  pHw->CR1 = I2C_CR1_PE; //允许外围(开启I2C)
+
   pI2cDev->eStatus = eI2cIdie;
 }
 
@@ -102,6 +114,16 @@ void I2cDev_IRQ(I2cDev_t *pI2cDev)
   unsigned char Index = pI2cDev->Index;    //命令或数据发送个数
   pI2cDev->ErrTimer = pData->Flag & I2C_WAIT_OV_MASK;//定时器复位
 
+  
+  //======================================故障处理=====================================
+  //             总线错误      仲裁丢失        无应答       PEC接收错误       超时错误         
+  if(HwSR1 & (I2C_SR1_BERR | I2C_SR1_ARLO | I2C_SR1_AF |  I2C_SR1_PECERR | I2C_SR1_TIMEOUT)){
+    //手工清除
+    pHw->SR1 &= ~(I2C_SR1_BERR | I2C_SR1_ARLO | I2C_SR1_AF |  I2C_SR1_PECERR | I2C_SR1_TIMEOUT);
+    eStatus = eI2cErrState;
+    goto _IrqEnd; //直接结束
+  }
+  
   //========================发送启动或从机地址=================================
   //己发送起始位,发送器件地址
   if(HwSR1 & I2C_SR1_SB){
@@ -207,7 +229,7 @@ void I2cDev_IRQ(I2cDev_t *pI2cDev)
 _IrqEnd: //结束处理
   //若I2C状态出错,则强行结束I2c总线
   if(eStatus == eI2cErrState){
-    pHw->CR1 = I2C_CR1_SWRST;
+    I2cDev_Reset(pI2cDev);//复位
     #ifdef SUPPORT_I2C_DEV_CB      //状态错误通报
       if(pData->Flag & I2C_CB_ERR) pI2cDev->CallBack(pI2cDev, I2C_CB_ERR);
     #endif
@@ -221,12 +243,10 @@ _IrqEnd: //结束处理
 //将此任务放入系统TICK中
 void I2cDev_Task(I2cDev_t *pI2cDev)
 {
-  I2C_TypeDef *pHw = (I2C_TypeDef *)(pI2cDev->pI2cHw);
-  
   if(pI2cDev->ErrTimer) pI2cDev->ErrTimer--;
   if(!pI2cDev->ErrTimer){//定时时间到，强行结束I2c总线
-    pHw->CR1 = I2C_CR1_SWRST;
-    pI2cDev->eStatus = eI2cErrOV; //等待超时错误
+    I2cDev_Reset(pI2cDev);//先复位
+    pI2cDev->eStatus = eI2cErrOV; //置等待超时错误
     #ifdef SUPPORT_I2C_DEV_CB      //超时回调
       if(pI2cDev->pData->Flag & I2C_CB_OV) pI2cDev->CallBack(pI2cDev, I2C_CB_OV);
     #endif

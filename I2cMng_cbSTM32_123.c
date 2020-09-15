@@ -42,10 +42,8 @@ const I2cCfgInt_t I2cMng_cbCfgInt[] = {
 extern void I2cDev_CfgClk(I2C_TypeDef *pHw, unsigned int Baudrate); //波特率
 
 //-----------------------底层硬件参数更新接口实现-------------------------------
-
 void I2cMng_cbUpdateCfg(unsigned char I2cId)
 {
-  I2cDev_Reset(I2cMng_pGetI2cDev(I2cId)); //先停止
   I2cDev_CfgClk((I2C_TypeDef *)I2cMng_cbHw[I2cId], 
                 I2cMng.I2c[I2cId].Info.BuadK * 1000);//重配置时钟
 }
@@ -59,6 +57,10 @@ void I2C1_EV_IRQHandler(void)
 {
   I2cDev_IRQ(I2cMng_pGetI2cDev(0));
 }
+void I2C1_ER_IRQHandler(void)
+{
+  I2cDev_IRQ(I2cMng_pGetI2cDev(0));
+}
 
 //-----------------------------I2C2事件硬件中断-------------------------------
 void I2C2_EV_IRQHandler(void)
@@ -66,8 +68,18 @@ void I2C2_EV_IRQHandler(void)
   I2cDev_IRQ(I2cMng_pGetI2cDev(1));
 }
 
+void I2C2_ER_IRQHandler(void)
+{
+  I2cDev_IRQ(I2cMng_pGetI2cDev(1));
+}
+
 //----------------------------I2C3事件硬件中断-------------------------------
 void I2C3_EV_IRQHandler(void)
+{
+  I2cDev_IRQ(I2cMng_pGetI2cDev(2));
+}
+
+void I2C3_ER_IRQHandler(void)
 {
   I2cDev_IRQ(I2cMng_pGetI2cDev(2));
 }

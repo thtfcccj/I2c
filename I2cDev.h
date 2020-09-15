@@ -56,7 +56,7 @@ enum eI2cStatus_t
   eI2cRdLast   = 5,     //读最后一个数,不向从机返回应答信号，并准备结束
   //I2c结束期间:
   eI2cDone     = 6,     //读写数据完成,等待数据处理
-  eI2cErrState = 7,     //I2c状态机错误
+  eI2cErrState = 7,     //I2c状态机错误,含无应答错误
   eI2cErrOV    = 8      //I2c等待超时错误
 };
 
