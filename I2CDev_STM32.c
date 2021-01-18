@@ -106,6 +106,12 @@ void I2cDev_Reset(I2cDev_t *pI2cDev)
 
 unsigned long _BusErrCount = 0;  //总线故障计数
 unsigned long _StateErrCount = 0;//状态故障计数
+unsigned long _HwSR1ErrCount = 0;//状态故障计数
+
+//pI2cDev->eStatus == eI2cRd时， pI2cDev->Index复用作读时内部状态机:
+#define   _RD_WAIT_RESTART   0  //（0xff不行） 等待重启动
+#define   _RD_WAIT_ADR_END   0  //（0xfe不行) 等待地址发送结速
+
 
 static volatile unsigned short HwSR2;
 //-----------------------------I2c中断处理程序-------------------------
@@ -136,7 +142,8 @@ void I2cDev_IRQ(I2cDev_t *pI2cDev)
   
   //========================发送启动=========================================
   //EV5: 己发送起始位,这里启动发送器件地址
-  if(HwSR1 & I2C_SR1_SB){//
+  if((HwSR1 & I2C_SR1_SB) || (HwSR1 == 0)){//重启动时，读取第二次为0
+    if(HwSR1 == 0) _HwSR1ErrCount++;
     //写器件地址,读写均为先读I2C
     if(eStatus == eI2cRdy){
       if((pData->CmdSize == 0) && (pData->Flag & I2C_CMD_RD)){//无指令读时(此硬件支持)
@@ -149,8 +156,9 @@ void I2cDev_IRQ(I2cDev_t *pI2cDev)
       }
     }
     //读数据时重启动总线后，发送器件地址
-    else if((eStatus == eI2cRd) && (Index == 0)){
+    else if((eStatus == eI2cRd) && (Index == _RD_WAIT_RESTART)){
       pHw->DR = (pData->SlvAdr << 1) | 1;//最低位写1表示主机接收状态,写启动发送
+      pI2cDev->Index = _RD_WAIT_ADR_END;//转收地址状态
     }
     else eStatus = eI2cErrState;   //状态机错误
     goto _IrqEnd; //直接结束
@@ -159,19 +167,23 @@ void I2cDev_IRQ(I2cDev_t *pI2cDev)
   //========================接收状态时，地址发送完成===========================
   //“EV6(ADDR=1)
   if((HwSR1 & (I2C_SR1_ADDR | I2C_SR1_TXE)) == I2C_SR1_ADDR){
-    if((eStatus == eI2cRd) && (Index == 0))//开始读时
+    if((eStatus == eI2cRd) && (Index == _RD_WAIT_ADR_END)){//开始读时
+      pI2cDev->Index = 0;//首个数
       pHw->CR1 |= I2C_CR1_ACK;//接收数据时预置应答允许
+    }
     else  //状态机错误
       eStatus = eI2cErrState;   //状态机错误
     goto _IrqEnd;          //直接结束
   }
   
-  //=========================缓冲区里的数据已发送完=====================
+  //===================缓冲区里的数据已发送完(停止信号已发送)===================
   //“EV8-2: TxE=1, BTF = 1,
   if((HwSR1 & (I2C_SR1_TXE | I2C_SR1_BTF)) == (I2C_SR1_TXE | I2C_SR1_BTF)){
     if((eStatus == eI2cRd) && (Index == 0)){//开始读时
-      pHw->CR1 &= ~ I2C_CR1_PE;//先关闭(尼玛，STM32不支持重启动信号)
-      pHw->CR1 |=  I2C_CR1_PE | I2C_CR1_START; //允许并开始启动(成功后进中断)
+      pHw->CR1 &= ~ I2C_CR1_PE;//先关闭(尼玛，STM32不支持重启动信号，这里启动还可能失败)
+      pI2cDev->Index = _RD_WAIT_RESTART;//重启动
+      pHw->CR1 |=  I2C_CR1_PE; //重新启动
+      pHw->CR1 |=  I2C_CR1_START; //允许并开始启动(成功后进中断)
     }
     else if((eStatus == eI2cWr) && (Index >= pData->DataSize)){//写完成时
       eStatus = eI2cDone;   //完成
@@ -273,6 +285,13 @@ void I2cDev_Task(I2cDev_t *pI2cDev)
     #ifdef SUPPORT_I2C_DEV_CB      //超时回调
       if(pI2cDev->pData->Flag & I2C_CB_OV) pI2cDev->CallBack(pI2cDev, I2C_CB_OV);
     #endif
+  }
+  else if((pI2cDev->eStatus == eI2cRd) && //开始读时启动失败重试
+          (pI2cDev->Index == _RD_WAIT_RESTART)){
+    I2C_TypeDef *pHw = (I2C_TypeDef *)(pI2cDev->pI2cHw);
+    pHw->CR1 &= ~ I2C_CR1_PE;//先关闭(尼玛，STM32不支持重启动信号)
+    pHw->CR1 |=  I2C_CR1_PE; //重新启动
+    pHw->CR1 |=  I2C_CR1_START; //允许并开始启动(成功后进中断)
   }
 }
 
