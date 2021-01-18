@@ -56,6 +56,7 @@ void I2cDev_Init(I2cDev_t *pI2cDev,        //未初始化的设备指针
   
   I2C_TypeDef *pHw = (I2C_TypeDef*)pI2cHw;
   I2cDev_CfgClk(pHw, Baudrate);
+  //I2cDev_Reset(pI2cDev);//复位硬件
 }
 
 //-----------------------------I2c读写数据启动函数-------------------------
@@ -88,6 +89,7 @@ void I2cDev_Reset(I2cDev_t *pI2cDev)
 {
   //复位硬件
   I2C_TypeDef *pHw = (I2C_TypeDef *)(pI2cDev->pI2cHw);
+  
   unsigned short CCR = pHw->CCR;//复位前记住波特率配置等
   pHw->CR1 = I2C_CR1_SWRST; //复位，同时将清除所有配置
   pHw->CR1 = 0;  
@@ -102,77 +104,100 @@ void I2cDev_Reset(I2cDev_t *pI2cDev)
   pI2cDev->eStatus = eI2cIdie;
 }
 
+unsigned long _BusErrCount = 0;  //总线故障计数
+unsigned long _StateErrCount = 0;//状态故障计数
+
+static volatile unsigned short HwSR2;
 //-----------------------------I2c中断处理程序-------------------------
 //将此函数放入中断处理程序中
 void I2cDev_IRQ(I2cDev_t *pI2cDev)
 {
+
   I2C_TypeDef *pHw = (I2C_TypeDef *)(pI2cDev->pI2cHw);
   I2cData_t *pData = pI2cDev->pData;
   unsigned short HwSR1 = pHw->SR1;//读硬件状态位
-  
+  HwSR2 = pHw->SR2;//读SR2清除I2C_SR1_SB标志
+
   enum eI2cStatus_t eStatus = pI2cDev->eStatus;//读状态机
+  //完成或未准备好禁止访问
+  if((eStatus <= eI2cIdie) || (eStatus >= eI2cDone)) return ;
+    
   unsigned char Index = pI2cDev->Index;    //命令或数据发送个数
   pI2cDev->ErrTimer = pData->Flag & I2C_WAIT_OV_MASK;//定时器复位
 
-  
   //======================================故障处理=====================================
-  //             总线错误      仲裁丢失        无应答       PEC接收错误       超时错误         
-  if(HwSR1 & (I2C_SR1_BERR | I2C_SR1_ARLO | I2C_SR1_AF |  I2C_SR1_PECERR | I2C_SR1_TIMEOUT)){
-    //手工清除
-    pHw->SR1 &= ~(I2C_SR1_BERR | I2C_SR1_ARLO | I2C_SR1_AF |  I2C_SR1_PECERR | I2C_SR1_TIMEOUT);
+  //             总线错误      仲裁丢失        无应答       超限/欠载      PEC接收错误       超时错误SCL为低超25ms)         
+  if(HwSR1 & (I2C_SR1_BERR | I2C_SR1_ARLO | I2C_SR1_AF |  I2C_SR1_OVR | I2C_SR1_PECERR | I2C_SR1_TIMEOUT)){
+    pHw->SR1 = 0;//全部清掉(只有这几位是可写并只能为0的)
     eStatus = eI2cErrState;
+    _BusErrCount++;
     goto _IrqEnd; //直接结束
   }
   
-  //========================发送启动或从机地址=================================
-  //己发送起始位,发送器件地址
-  if(HwSR1 & I2C_SR1_SB){
-    volatile unsigned short HwSR2 = pHw->SR2;//读SR2清除I2C_SR1_SB标志
+  //========================发送启动=========================================
+  //EV5: 己发送起始位,这里启动发送器件地址
+  if(HwSR1 & I2C_SR1_SB){//
     //写器件地址,读写均为先读I2C
     if(eStatus == eI2cRdy){
       if((pData->CmdSize == 0) && (pData->Flag & I2C_CMD_RD)){//无指令读时(此硬件支持)
+        eStatus = eI2cRd;//直接读
         pHw->DR = (pData->SlvAdr << 1) | 1;//最低位写1表示主机接收状态,写启动发送
-        pHw->CR1 |= I2C_CR1_ACK;//接收数据时预置应答允许
       }
       else{//有指令，或无指令发送时
+        eStatus = eI2cWrCmd;        
         pHw->DR = (pData->SlvAdr << 1) | 0; //最低位写0表示主机发送状态,写启动发送
-        eStatus = eI2cWrCmd;
       }
     }
     //读数据时重启动总线后，发送器件地址
     else if((eStatus == eI2cRd) && (Index == 0)){
-      pHw->DR = (pData->SlvAdr << 1) | 0x01;//最低位写1表示主机接收状态,写启动发送
-      pHw->CR1 |= I2C_CR1_ACK;//接收数据时预置应答允许
+      pHw->DR = (pData->SlvAdr << 1) | 1;//最低位写1表示主机接收状态,写启动发送
     }
     else eStatus = eI2cErrState;   //状态机错误
     goto _IrqEnd; //直接结束
   }
-  //已发送器件地址和标志并接收到应答
-  if(HwSR1 & I2C_SR1_ADDR){
-    if((eStatus == eI2cWrCmd) && (Index == 0)){
-      HwSR1 = I2C_SR1_TXE; //此条件转至发送第一个数   
-    }
-    else if((eStatus == eI2cRd) && (Index == 0))
-      HwSR1 = I2C_SR1_RXNE; //此条件转至接收第一个数
-    else{
+
+  //========================接收状态时，地址发送完成===========================
+  //“EV6(ADDR=1)
+  if((HwSR1 & (I2C_SR1_ADDR | I2C_SR1_TXE)) == I2C_SR1_ADDR){
+    if((eStatus == eI2cRd) && (Index == 0))//开始读时
+      pHw->CR1 |= I2C_CR1_ACK;//接收数据时预置应答允许
+    else  //状态机错误
       eStatus = eI2cErrState;   //状态机错误
-      goto _IrqEnd;          //直接结束
+    goto _IrqEnd;          //直接结束
+  }
+  
+  //=========================缓冲区里的数据已发送完=====================
+  //“EV8-2: TxE=1, BTF = 1,
+  if((HwSR1 & (I2C_SR1_TXE | I2C_SR1_BTF)) == (I2C_SR1_TXE | I2C_SR1_BTF)){
+    if((eStatus == eI2cRd) && (Index == 0)){//开始读时
+      pHw->CR1 &= ~ I2C_CR1_PE;//先关闭(尼玛，STM32不支持重启动信号)
+      pHw->CR1 |=  I2C_CR1_PE | I2C_CR1_START; //允许并开始启动(成功后进中断)
     }
-    //这里可继续
-  }  
+    else if((eStatus == eI2cWr) && (Index >= pData->DataSize)){//写完成时
+      eStatus = eI2cDone;   //完成
+      #ifdef SUPPORT_I2C_DEV_CB      //完成通报
+        if(pData->Flag & I2C_CB_FINAL) pI2cDev->CallBack(pI2cDev, I2C_CB_FINAL);
+      #endif
+    }
+    else eStatus = eI2cErrState;   //状态机错误
+    goto _IrqEnd;          //直接结束
+  }
   //============================发送命令或发送数据===========================
-  //已发送完一组数据
+  //EV8: 发送缓冲为空(可能还未发出)，需提前准备下一组
   if(HwSR1 & I2C_SR1_TXE){
+    if(eStatus == eI2cRd) return;//异常进入
     if(eStatus == eI2cWrCmd){   //写命令阶段
       if(Index < pData->CmdSize){
-        pHw->DR = *(pData->pData + Index); //写启动发送
+        pHw->DR = *(pData->pCmd + Index); //写启动发送
         pI2cDev->Index++;
+        goto _IrqEnd; //直接结束
       }
       else{//命令发送完成:
         pI2cDev->Index = 0;
-        if(pData->Flag & I2C_CMD_RD){//读数据，重新启动总线
-          pHw->CR1 |=  I2C_CR1_START; //重启总线
-          eStatus = eI2cRd;
+        if(pData->Flag & I2C_CMD_RD){//下准准备读数据
+          pHw->CR1 = I2C_CR1_STOP; //发送停止信号
+          eStatus = eI2cRd;//不再写数据了，让缓冲区数据到总线完成
+          goto _IrqEnd; //直接结束
         }
         else eStatus = eI2cWr;//写数据，开始发送第一个数据
       }
@@ -183,17 +208,14 @@ void I2cDev_IRQ(I2cDev_t *pI2cDev)
         pI2cDev->Index++;
       }
       else{ //数据写完成,结束总线
-        pHw->CR1 = I2C_CR1_STOP;
-        eStatus = eI2cDone;   //写完成
-        #ifdef SUPPORT_I2C_DEV_CB      //完成通报
-          if(pData->Flag & I2C_CB_FINAL) pI2cDev->CallBack(pI2cDev, I2C_CB_FINAL);
-        #endif
+        pHw->CR1 = I2C_CR1_STOP; //发送停止信号
       }
     }
     else eStatus = eI2cErrState;   //状态机错误
     goto _IrqEnd; //直接结束
   }
   //===================================接收数据=================================
+  //“EV7: 
   if(HwSR1 & I2C_SR1_RXNE){//数据已接收到了
     if(eStatus == eI2cRd){//读数据过程中
       if(Index < pData->DataSize){//接收中,没有接收完成
@@ -205,31 +227,31 @@ void I2cDev_IRQ(I2cDev_t *pI2cDev)
         //准备接收最后一个数了
         if(pI2cDev->Index >= (pData->DataSize - 1)){
           pHw->CR1 &= ~I2C_CR1_ACK;//取消应答标志，以让从机不发数了
-          pHw->CR1 = I2C_CR1_STOP; //发送停止位
-          eStatus = eI2cRdLast;
+          eStatus = eI2cRdLast;//等待结束
         }
+        else pHw->CR1 |= I2C_CR1_ACK;//继续应答
       }
-      else eStatus = eI2cErrState;//长度超限
     }
-    else if(eStatus == eI2cRd){//读最后一个数据，此时总线已结束
-      if(Index == (pData->DataSize - 1)){
-        *(pData->pData + Index) = pHw->DR;//读取数据并清中断
-        eStatus = eI2cDone;   //读完成
-        #ifdef SUPPORT_I2C_DEV_CB      //完成通报
-          if(pData->Flag & I2C_CB_FINAL) pI2cDev->CallBack(pI2cDev, I2C_CB_FINAL);
-        #endif
-      }
-      else eStatus = eI2cErrState;//位置不对
+    else if(eStatus == eI2cRdLast){//按收完成
+      *(pData->pData + Index) = pHw->DR;//读取最后一个数据
+      pHw->CR1 = I2C_CR1_STOP; //停止位停止通讯
+      pHw->CR1 &= ~I2C_CR1_PE;//关闭I2C
+      eStatus = eI2cDone;   //完成
+      #ifdef SUPPORT_I2C_DEV_CB      //完成通报
+        if(pData->Flag & I2C_CB_FINAL) pI2cDev->CallBack(pI2cDev, I2C_CB_FINAL);
+      #endif
     }
     else eStatus = eI2cErrState;//状态机错误
     goto _IrqEnd; //直接结束
   }
+  _StateErrCount++;  
   eStatus = eI2cErrState;//状态机错误
 
 _IrqEnd: //结束处理
   //若I2C状态出错,则强行结束I2c总线
   if(eStatus == eI2cErrState){
-    I2cDev_Reset(pI2cDev);//复位
+    pHw->CR1 = I2C_CR1_STOP; //停止位停止通讯
+    pHw->CR1 &= ~I2C_CR1_PE;//关闭I2C
     #ifdef SUPPORT_I2C_DEV_CB      //状态错误通报
       if(pData->Flag & I2C_CB_ERR) pI2cDev->CallBack(pI2cDev, I2C_CB_ERR);
     #endif
@@ -243,7 +265,8 @@ _IrqEnd: //结束处理
 //将此任务放入系统TICK中
 void I2cDev_Task(I2cDev_t *pI2cDev)
 {
-  if(pI2cDev->ErrTimer) pI2cDev->ErrTimer--;
+  if(!pI2cDev->ErrTimer) return;
+  pI2cDev->ErrTimer--;
   if(!pI2cDev->ErrTimer){//定时时间到，强行结束I2c总线
     I2cDev_Reset(pI2cDev);//先复位
     pI2cDev->eStatus = eI2cErrOV; //置等待超时错误

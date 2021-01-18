@@ -22,14 +22,17 @@ void* const I2cMng_cbHw[] = {I2C1, I2C2, I2C3};
 static void _CfgInt1(void)
 {
   NVIC_Config(1,1, I2C1_EV_IRQn);
+  NVIC_Config(1,1, I2C1_ER_IRQn);
 }
 static void _CfgInt2(void)
 {
-  NVIC_Config(1,2,I2C2_EV_IRQn);
+  NVIC_Config(1,2, I2C2_EV_IRQn);
+  NVIC_Config(1,2, I2C2_ER_IRQn);
 }
 static void _CfgInt3(void)
 {
-  NVIC_Config(1,3,I2C3_EV_IRQn);
+  NVIC_Config(1,3, I2C3_EV_IRQn);
+  NVIC_Config(1,3, I2C3_ER_IRQn);
 }
 
 const I2cCfgInt_t I2cMng_cbCfgInt[] = {
