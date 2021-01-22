@@ -211,7 +211,11 @@ void I2cDev_IRQ(I2cDev_t *pI2cDev)
           eStatus = eI2cRd;//不再写数据了，让缓冲区数据到总线完成
           goto _IrqEnd; //直接结束
         }
-        else eStatus = eI2cWr;//写数据，开始发送第一个数据
+        else{//写数据，开始发送第一个数据
+          eStatus = eI2cWr;
+          Index = 0;
+          //继续以写入
+        }
       }
     }
     if(eStatus == eI2cWr){    //写数据阶段,(无else)
