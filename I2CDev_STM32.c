@@ -36,7 +36,6 @@ void I2cDev_CfgClk(I2C_TypeDef *pHw,
   Baud /= 100;
   pHw->TRISE = Baud;//上升沿,回环模式用得到
   pHw->FLTR = Baud;//开启数据滤波，多少个时间周期有效
-  pHw->CR1 = I2C_CR1_PE; //允许外围(开启I2C)
 }
 
 //------------------------------I2c设备初始化函数----------------------
@@ -99,7 +98,6 @@ void I2cDev_Reset(I2cDev_t *pI2cDev)
   CCR /= 100;
   pHw->TRISE = CCR;//上升沿,回环模式用得到
   pHw->FLTR = CCR;//开启数据滤波，多少个时间周期有效
-  pHw->CR1 = I2C_CR1_PE; //允许外围(开启I2C)
 
   pI2cDev->eStatus = eI2cIdie;
 }
@@ -121,7 +119,7 @@ void I2cDev_IRQ(I2cDev_t *pI2cDev)
 
   I2C_TypeDef *pHw = (I2C_TypeDef *)(pI2cDev->pI2cHw);
   I2cData_t *pData = pI2cDev->pData;
-  unsigned short HwSR1 = pHw->SR1;//读硬件状态位
+  volatile unsigned short HwSR1 = pHw->SR1;//读硬件状态位
   HwSR2 = pHw->SR2;//读SR2清除I2C_SR1_SB标志
 
   enum eI2cStatus_t eStatus = pI2cDev->eStatus;//读状态机
